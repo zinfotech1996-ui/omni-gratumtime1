@@ -1,5 +1,6 @@
 import React from 'react';
-import { BrowserRouter, Routes, Route, Navigate , HashRouter} from 'react-router-dom';
+//import { BrowserRouter, Routes, Route, Navigate , HashRouter} from 'react-router-dom';
+import { HashRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider } from './contexts/AuthContext';
 import { TimerProvider } from './contexts/TimerContext';
 import { ThemeProvider } from './contexts/ThemeContext';
@@ -20,7 +21,7 @@ import './App.css';
 
 function App() {
   return (
-    <HashRouter>
+    <Router>
       <ThemeProvider>
         <AuthProvider>
           <NotificationProvider>
@@ -74,7 +75,7 @@ function App() {
           </NotificationProvider>
         </AuthProvider>
       </ThemeProvider>
-    </HashRouter>
+    </Router>
   );
 }
 

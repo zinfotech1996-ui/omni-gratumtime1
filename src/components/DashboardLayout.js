@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Outlet, useLocation, Navigate } from 'react-router-dom';
+import { Outlet, useLocation, Navigate, Link } from 'react-router-dom'; // Add Link here
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { Clock, LayoutDashboard, Users, FolderKanban, FileText, BarChart3, Settings, LogOut, Moon, Sun, Globe, Bell } from 'lucide-react';
@@ -68,15 +68,15 @@ export const DashboardLayout = () => {
             <p className="text-xs text-muted-foreground mt-1">{t('app.subtitle')}</p>
           </div>
 
-          {/* Navigation */}
+          {/* Navigation - CHANGED FROM <a> TO <Link> */}
           <nav className="flex-1 p-4 space-y-1 overflow-y-auto">
             {navigation.map((item) => {
               const isActive = location.pathname === item.href;
               const Icon = item.icon;
               return (
-                <a
+                <Link
                   key={item.name}
-                  href={item.href}
+                  to={item.href}   
                   data-testid={`nav-${item.name.toLowerCase().replace(/\s+/g, '-')}`}
                   className={`flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
                     isActive
@@ -86,7 +86,7 @@ export const DashboardLayout = () => {
                 >
                   <Icon className="h-5 w-5" />
                   {item.name}
-                </a>
+                </Link>
               );
             })}
           </nav>
