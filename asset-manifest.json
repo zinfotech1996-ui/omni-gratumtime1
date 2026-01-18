@@ -1,13 +1,13 @@
 {
   "files": {
     "main.css": "/omni-gratumtime1/static/css/main.5eb73ffe.css",
-    "main.js": "/omni-gratumtime1/static/js/main.885201d6.js",
+    "main.js": "/omni-gratumtime1/static/js/main.e352f7ea.js",
     "index.html": "/omni-gratumtime1/index.html",
     "main.5eb73ffe.css.map": "/omni-gratumtime1/static/css/main.5eb73ffe.css.map",
-    "main.885201d6.js.map": "/omni-gratumtime1/static/js/main.885201d6.js.map"
+    "main.e352f7ea.js.map": "/omni-gratumtime1/static/js/main.e352f7ea.js.map"
   },
   "entrypoints": [
     "static/css/main.5eb73ffe.css",
-    "static/js/main.885201d6.js"
+    "static/js/main.e352f7ea.js"
   ]
 }
