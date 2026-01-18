@@ -36,8 +36,13 @@ export const LoginPage = () => {
         <div className="w-full max-w-md space-y-8">
           {/* Logo */}
           <div className="text-center">
-            <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-primary mb-4">
-              <Clock className="h-8 w-8 text-primary-foreground" />
+          <div className="inline-flex items-center justify-center w-60 h-26 mb-2">
+              {/* <Clock className="h-8 w-8 text-primary-foreground" /> */}
+              <img 
+                src="/omni_gratum_logo_whitebg.jpg" 
+                alt="Omni Gratum Logo" 
+                className="h-full w-auto object-contain"
+              />
             </div>
             <h1 className="text-4xl font-bold tracking-tight" style={{ fontFamily: 'Plus Jakarta Sans, sans-serif' }}>
               Omni Gratum
@@ -96,10 +101,10 @@ export const LoginPage = () => {
       <div
         className="hidden lg:block lg:w-1/2 bg-cover bg-center relative"
         style={{
-          backgroundImage: `url('https://images.unsplash.com/photo-1758208974170-3a3037da0c69?crop=entropy&cs=srgb&fm=jpg&q=85')`,
+          backgroundImage: `url('login_bg.jpg')`,
         }}
       >
-        <div className="absolute inset-0 bg-primary/10 backdrop-blur-sm"></div>
+        <div className="absolute inset-0 bg-primary/10 "></div>
       </div>
     </div>
   );
