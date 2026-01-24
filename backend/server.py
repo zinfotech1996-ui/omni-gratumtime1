@@ -3,14 +3,14 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
+from supabase import create_client, Client
 import os
 import logging
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict, EmailStr
 from typing import List, Optional, Dict, Any
 import uuid
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 from passlib.context import CryptContext
 import jwt
 from enum import Enum
@@ -24,10 +24,10 @@ from reportlab.lib.units import inch
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+# Supabase connection
+supabase_url = os.environ['SUPABASE_URL']
+supabase_key = os.environ['SUPABASE_SERVICE_KEY']
+supabase: Client = create_client(supabase_url, supabase_key)
 
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -66,14 +66,14 @@ class TimesheetStatus(str, Enum):
 # Models
 class User(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    id: str
     email: EmailStr
     name: str
     role: UserRole
     status: UserStatus = UserStatus.ACTIVE
     default_project: Optional[str] = None
     default_task: Optional[str] = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime
 
 class UserCreate(BaseModel):
     email: EmailStr
@@ -102,12 +102,12 @@ class LoginResponse(BaseModel):
 
 class Project(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    id: str
     name: str
     description: Optional[str] = None
     created_by: str
     status: str = "active"
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime
 
 class ProjectCreate(BaseModel):
     name: str
@@ -115,12 +115,12 @@ class ProjectCreate(BaseModel):
 
 class Task(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    id: str
     name: str
     description: Optional[str] = None
     project_id: str
     status: str = "active"
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime
 
 class TaskCreate(BaseModel):
     name: str
@@ -129,7 +129,7 @@ class TaskCreate(BaseModel):
 
 class TimeEntry(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    id: str
     user_id: str
     project_id: str
     task_id: str
@@ -139,7 +139,7 @@ class TimeEntry(BaseModel):
     entry_type: EntryType
     date: str  # YYYY-MM-DD
     notes: Optional[str] = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime
 
 class TimeEntryCreate(BaseModel):
     project_id: str
@@ -152,7 +152,7 @@ class TimeEntryCreate(BaseModel):
 
 class TimerSession(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    id: str
     user_id: str
     project_id: str
     task_id: str
@@ -170,7 +170,7 @@ class TimerStopRequest(BaseModel):
 
 class Timesheet(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    id: str
     user_id: str
     week_start: str  # YYYY-MM-DD
     week_end: str  # YYYY-MM-DD
@@ -180,7 +180,7 @@ class Timesheet(BaseModel):
     reviewed_at: Optional[datetime] = None
     reviewed_by: Optional[str] = None
     admin_comment: Optional[str] = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime
 
 class TimesheetSubmit(BaseModel):
     week_start: str
@@ -197,14 +197,14 @@ class NotificationType(str, Enum):
 
 class Notification(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    id: str
     user_id: str
     type: NotificationType
     title: str
     message: str
     read: bool = False
     related_timesheet_id: Optional[str] = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime
 
 
 # Utility functions
@@ -223,17 +223,16 @@ def create_access_token(data: dict) -> str:
 
 async def create_notification(user_id: str, notification_type: NotificationType, title: str, message: str, related_timesheet_id: Optional[str] = None):
     """Helper function to create a notification"""
-    notification = Notification(
-        user_id=user_id,
-        type=notification_type,
-        title=title,
-        message=message,
-        related_timesheet_id=related_timesheet_id
-    )
-    notification_doc = notification.model_dump()
-    notification_doc['created_at'] = notification_doc['created_at'].isoformat()
-    await db.notifications.insert_one(notification_doc)
-    return notification
+    notification_data = {
+        "user_id": user_id,
+        "type": notification_type.value,
+        "title": title,
+        "message": message,
+        "related_timesheet_id": related_timesheet_id,
+        "read": False
+    }
+    result = supabase.table('notifications').insert(notification_data).execute()
+    return result.data[0] if result.data else None
 
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> User:
@@ -248,11 +247,12 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     except jwt.JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
     
-    user_doc = await db.users.find_one({"id": user_id}, {"_id": 0})
-    if user_doc is None:
+    result = supabase.table('users').select('*').eq('id', user_id).execute()
+    if not result.data:
         raise HTTPException(status_code=401, detail="User not found")
     
-    user = User(**user_doc)
+    user_data = result.data[0]
+    user = User(**user_data)
     if user.status == UserStatus.INACTIVE:
         raise HTTPException(status_code=403, detail="Account is inactive")
     
@@ -263,48 +263,18 @@ async def get_admin_user(current_user: User = Depends(get_current_user)) -> User
         raise HTTPException(status_code=403, detail="Admin access required")
     return current_user
 
-# Initialize default admin and employee
-async def init_default_admin():
-    existing_admin = await db.users.find_one({"role": UserRole.ADMIN.value}, {"_id": 0})
-    if not existing_admin:
-        admin_user = User(
-            email="admin@omnigratum.com",
-            name="Admin User",
-            role=UserRole.ADMIN,
-            status=UserStatus.ACTIVE
-        )
-        admin_doc = admin_user.model_dump()
-        admin_doc['password'] = hash_password("admin123")
-        admin_doc['created_at'] = admin_doc['created_at'].isoformat()
-        await db.users.insert_one(admin_doc)
-        logging.info("Default admin created: admin@omnigratum.com / admin123")
-    
-    # Create default employee user for testing timer widget
-    existing_employee = await db.users.find_one({"email": "employee@omnigratum.com"}, {"_id": 0})
-    if not existing_employee:
-        employee_user = User(
-            email="employee@omnigratum.com",
-            name="John Employee",
-            role=UserRole.EMPLOYEE,
-            status=UserStatus.ACTIVE
-        )
-        employee_doc = employee_user.model_dump()
-        employee_doc['password'] = hash_password("employee123")
-        employee_doc['created_at'] = employee_doc['created_at'].isoformat()
-        await db.users.insert_one(employee_doc)
-        logging.info("Default employee created: employee@omnigratum.com / employee123")
-
 # Auth routes
 @api_router.post("/auth/login", response_model=LoginResponse)
 async def login(request: LoginRequest):
-    user_doc = await db.users.find_one({"email": request.email}, {"_id": 0})
-    if not user_doc:
+    result = supabase.table('users').select('*').eq('email', request.email).execute()
+    if not result.data:
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
-    if not verify_password(request.password, user_doc.get('password', '')):
+    user_data = result.data[0]
+    if not verify_password(request.password, user_data.get('password', '')):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
-    user = User(**user_doc)
+    user = User(**user_data)
     if user.status == UserStatus.INACTIVE:
         raise HTTPException(status_code=403, detail="Account is inactive. Contact administrator.")
     
@@ -321,106 +291,84 @@ async def start_timer(request: TimerStartRequest, current_user: User = Depends(g
     today = datetime.now(timezone.utc).date().isoformat()
     
     # Check for existing active timer
-    existing_timer = await db.timer_sessions.find_one(
-        {"user_id": current_user.id, "is_active": True},
-        {"_id": 0}
-    )
-    if existing_timer:
+    result = supabase.table('timer_sessions').select('*').eq('user_id', current_user.id).eq('is_active', True).execute()
+    if result.data:
         raise HTTPException(status_code=400, detail="Timer already running. Stop current timer first.")
     
     # Create new timer session
     now = datetime.now(timezone.utc)
-    timer = TimerSession(
-        user_id=current_user.id,
-        project_id=request.project_id,
-        task_id=request.task_id,
-        start_time=now,
-        last_heartbeat=now,
-        is_active=True,
-        date=today
-    )
+    timer_data = {
+        "user_id": current_user.id,
+        "project_id": request.project_id,
+        "task_id": request.task_id,
+        "start_time": now.isoformat(),
+        "last_heartbeat": now.isoformat(),
+        "is_active": True,
+        "date": today
+    }
     
-    timer_doc = timer.model_dump()
-    timer_doc['start_time'] = timer_doc['start_time'].isoformat()
-    timer_doc['last_heartbeat'] = timer_doc['last_heartbeat'].isoformat()
-    await db.timer_sessions.insert_one(timer_doc)
+    result = supabase.table('timer_sessions').insert(timer_data).execute()
+    timer = result.data[0] if result.data else None
     
     return {"success": True, "timer": timer}
 
 @api_router.post("/timer/heartbeat")
 async def timer_heartbeat(current_user: User = Depends(get_current_user)):
-    timer_doc = await db.timer_sessions.find_one(
-        {"user_id": current_user.id, "is_active": True},
-        {"_id": 0}
-    )
-    if not timer_doc:
+    result = supabase.table('timer_sessions').select('*').eq('user_id', current_user.id).eq('is_active', True).execute()
+    if not result.data:
         raise HTTPException(status_code=404, detail="No active timer found")
     
+    timer = result.data[0]
     now = datetime.now(timezone.utc)
-    await db.timer_sessions.update_one(
-        {"id": timer_doc['id']},
-        {"$set": {"last_heartbeat": now.isoformat()}}
-    )
+    
+    supabase.table('timer_sessions').update({
+        "last_heartbeat": now.isoformat()
+    }).eq('id', timer['id']).execute()
     
     return {"success": True, "last_heartbeat": now}
 
 @api_router.post("/timer/stop")
 async def stop_timer(request: TimerStopRequest, current_user: User = Depends(get_current_user)):
-    timer_doc = await db.timer_sessions.find_one(
-        {"user_id": current_user.id, "is_active": True},
-        {"_id": 0}
-    )
-    if not timer_doc:
+    result = supabase.table('timer_sessions').select('*').eq('user_id', current_user.id).eq('is_active', True).execute()
+    if not result.data:
         raise HTTPException(status_code=404, detail="No active timer found")
     
+    timer = result.data[0]
+    
     # Calculate duration
-    start_time = datetime.fromisoformat(timer_doc['start_time'])
+    start_time = datetime.fromisoformat(timer['start_time'].replace('Z', '+00:00'))
     end_time = datetime.now(timezone.utc)
     duration = int((end_time - start_time).total_seconds())
     
     # Create time entry
-    time_entry = TimeEntry(
-        user_id=current_user.id,
-        project_id=timer_doc['project_id'],
-        task_id=timer_doc['task_id'],
-        start_time=start_time,
-        end_time=end_time,
-        duration=duration,
-        entry_type=EntryType.TIMER,
-        date=timer_doc['date'],
-        notes=request.notes
-    )
+    time_entry_data = {
+        "user_id": current_user.id,
+        "project_id": timer['project_id'],
+        "task_id": timer['task_id'],
+        "start_time": start_time.isoformat(),
+        "end_time": end_time.isoformat(),
+        "duration": duration,
+        "entry_type": EntryType.TIMER.value,
+        "date": timer['date'],
+        "notes": request.notes
+    }
     
-    entry_doc = time_entry.model_dump()
-    entry_doc['start_time'] = entry_doc['start_time'].isoformat()
-    entry_doc['end_time'] = entry_doc['end_time'].isoformat()
-    entry_doc['created_at'] = entry_doc['created_at'].isoformat()
-    await db.time_entries.insert_one(entry_doc)
+    entry_result = supabase.table('time_entries').insert(time_entry_data).execute()
     
     # Deactivate timer
-    await db.timer_sessions.update_one(
-        {"id": timer_doc['id']},
-        {"$set": {"is_active": False}}
-    )
+    supabase.table('timer_sessions').update({
+        "is_active": False
+    }).eq('id', timer['id']).execute()
     
-    return {"success": True, "time_entry": time_entry}
+    return {"success": True, "time_entry": entry_result.data[0] if entry_result.data else None}
 
 @api_router.get("/timer/active")
 async def get_active_timer(current_user: User = Depends(get_current_user)):
-    timer_doc = await db.timer_sessions.find_one(
-        {"user_id": current_user.id, "is_active": True},
-        {"_id": 0}
-    )
-    if not timer_doc:
+    result = supabase.table('timer_sessions').select('*').eq('user_id', current_user.id).eq('is_active', True).execute()
+    if not result.data:
         return {"active": False, "timer": None}
     
-    # Parse datetime
-    if isinstance(timer_doc['start_time'], str):
-        timer_doc['start_time'] = datetime.fromisoformat(timer_doc['start_time'])
-    if isinstance(timer_doc['last_heartbeat'], str):
-        timer_doc['last_heartbeat'] = datetime.fromisoformat(timer_doc['last_heartbeat'])
-    
-    timer = TimerSession(**timer_doc)
+    timer = result.data[0]
     return {"active": True, "timer": timer}
 
 # Time entries routes
@@ -431,33 +379,23 @@ async def get_time_entries(
     user_id: Optional[str] = None,
     current_user: User = Depends(get_current_user)
 ):
-    query = {}
+    query = supabase.table('time_entries').select('*')
     
     # Admins can see all entries, employees only their own
     if current_user.role == UserRole.EMPLOYEE:
-        query['user_id'] = current_user.id
+        query = query.eq('user_id', current_user.id)
     elif user_id:
-        query['user_id'] = user_id
+        query = query.eq('user_id', user_id)
     
     if start_date and end_date:
-        query['date'] = {"$gte": start_date, "$lte": end_date}
+        query = query.gte('date', start_date).lte('date', end_date)
     elif start_date:
-        query['date'] = {"$gte": start_date}
+        query = query.gte('date', start_date)
     elif end_date:
-        query['date'] = {"$lte": end_date}
+        query = query.lte('date', end_date)
     
-    entries = await db.time_entries.find(query, {"_id": 0}).sort("start_time", -1).to_list(1000)
-    
-    # Parse datetime strings
-    for entry in entries:
-        if isinstance(entry['start_time'], str):
-            entry['start_time'] = datetime.fromisoformat(entry['start_time'])
-        if entry.get('end_time') and isinstance(entry['end_time'], str):
-            entry['end_time'] = datetime.fromisoformat(entry['end_time'])
-        if isinstance(entry['created_at'], str):
-            entry['created_at'] = datetime.fromisoformat(entry['created_at'])
-    
-    return entries
+    result = query.order('start_time', desc=True).limit(1000).execute()
+    return result.data
 
 @api_router.post("/time-entries/manual", response_model=TimeEntry)
 async def create_manual_entry(entry: TimeEntryCreate, current_user: User = Depends(get_current_user)):
@@ -470,94 +408,81 @@ async def create_manual_entry(entry: TimeEntryCreate, current_user: User = Depen
     else:
         duration = entry.duration
     
-    time_entry = TimeEntry(
-        user_id=current_user.id,
-        project_id=entry.project_id,
-        task_id=entry.task_id,
-        start_time=entry.start_time,
-        end_time=entry.end_time,
-        duration=duration,
-        entry_type=EntryType.MANUAL,
-        date=entry.start_time.date().isoformat(),
-        notes=entry.notes
-    )
+    time_entry_data = {
+        "user_id": current_user.id,
+        "project_id": entry.project_id,
+        "task_id": entry.task_id,
+        "start_time": entry.start_time.isoformat(),
+        "end_time": entry.end_time.isoformat(),
+        "duration": duration,
+        "entry_type": EntryType.MANUAL.value,
+        "date": entry.start_time.date().isoformat(),
+        "notes": entry.notes
+    }
     
-    entry_doc = time_entry.model_dump()
-    entry_doc['start_time'] = entry_doc['start_time'].isoformat()
-    entry_doc['end_time'] = entry_doc['end_time'].isoformat()
-    entry_doc['created_at'] = entry_doc['created_at'].isoformat()
-    await db.time_entries.insert_one(entry_doc)
-    
-    return time_entry
+    result = supabase.table('time_entries').insert(time_entry_data).execute()
+    return result.data[0] if result.data else None
 
 @api_router.delete("/time-entries/{entry_id}")
 async def delete_time_entry(entry_id: str, current_user: User = Depends(get_current_user)):
-    entry = await db.time_entries.find_one({"id": entry_id}, {"_id": 0})
-    if not entry:
+    result = supabase.table('time_entries').select('*').eq('id', entry_id).execute()
+    if not result.data:
         raise HTTPException(status_code=404, detail="Entry not found")
+    
+    entry = result.data[0]
     
     # Only owner or admin can delete
     if entry['user_id'] != current_user.id and current_user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Not authorized")
     
-    await db.time_entries.delete_one({"id": entry_id})
+    supabase.table('time_entries').delete().eq('id', entry_id).execute()
     return {"success": True}
 
 # Timesheets routes
 @api_router.post("/timesheets/submit")
 async def submit_timesheet(request: TimesheetSubmit, current_user: User = Depends(get_current_user)):
     # Check if already submitted
-    existing = await db.timesheets.find_one({
-        "user_id": current_user.id,
-        "week_start": request.week_start,
-        "week_end": request.week_end
-    }, {"_id": 0})
+    result = supabase.table('timesheets').select('*').eq('user_id', current_user.id).eq('week_start', request.week_start).eq('week_end', request.week_end).execute()
+    
+    existing = result.data[0] if result.data else None
     
     if existing and existing.get('status') in [TimesheetStatus.SUBMITTED.value, TimesheetStatus.APPROVED.value]:
         raise HTTPException(status_code=400, detail="Timesheet already submitted for this period")
     
     # Calculate total hours
-    entries = await db.time_entries.find({
-        "user_id": current_user.id,
-        "date": {"$gte": request.week_start, "$lte": request.week_end}
-    }, {"_id": 0}).to_list(1000)
+    entries_result = supabase.table('time_entries').select('*').eq('user_id', current_user.id).gte('date', request.week_start).lte('date', request.week_end).execute()
     
-    total_seconds = sum(entry.get('duration', 0) for entry in entries)
+    total_seconds = sum(entry.get('duration', 0) for entry in entries_result.data)
     total_hours = round(total_seconds / 3600, 2)
     
     now = datetime.now(timezone.utc)
     
     if existing:
         # Update existing
-        await db.timesheets.update_one(
-            {"id": existing['id']},
-            {"$set": {
-                "total_hours": total_hours,
-                "status": TimesheetStatus.SUBMITTED.value,
-                "submitted_at": now.isoformat()
-            }}
-        )
+        update_data = {
+            "total_hours": total_hours,
+            "status": TimesheetStatus.SUBMITTED.value,
+            "submitted_at": now.isoformat()
+        }
+        supabase.table('timesheets').update(update_data).eq('id', existing['id']).execute()
         timesheet_id = existing['id']
     else:
         # Create new
-        timesheet = Timesheet(
-            user_id=current_user.id,
-            week_start=request.week_start,
-            week_end=request.week_end,
-            total_hours=total_hours,
-            status=TimesheetStatus.SUBMITTED,
-            submitted_at=now
-        )
+        timesheet_data = {
+            "user_id": current_user.id,
+            "week_start": request.week_start,
+            "week_end": request.week_end,
+            "total_hours": total_hours,
+            "status": TimesheetStatus.SUBMITTED.value,
+            "submitted_at": now.isoformat()
+        }
         
-        timesheet_doc = timesheet.model_dump()
-        timesheet_doc['submitted_at'] = timesheet_doc['submitted_at'].isoformat()
-        timesheet_doc['created_at'] = timesheet_doc['created_at'].isoformat()
-        await db.timesheets.insert_one(timesheet_doc)
-        timesheet_id = timesheet.id
+        result = supabase.table('timesheets').insert(timesheet_data).execute()
+        timesheet_id = result.data[0]['id'] if result.data else None
     
     # Create notifications for all admins
-    admins = await db.users.find({"role": UserRole.ADMIN.value}, {"_id": 0}).to_list(1000)
-    for admin in admins:
+    admins_result = supabase.table('users').select('*').eq('role', UserRole.ADMIN.value).execute()
+    for admin in admins_result.data:
         await create_notification(
             user_id=admin['id'],
             notification_type=NotificationType.TIMESHEET_SUBMITTED,
@@ -574,29 +499,19 @@ async def get_timesheets(
     user_id: Optional[str] = None,
     current_user: User = Depends(get_current_user)
 ):
-    query = {}
+    query = supabase.table('timesheets').select('*')
     
     # Employees see only their own
     if current_user.role == UserRole.EMPLOYEE:
-        query['user_id'] = current_user.id
+        query = query.eq('user_id', current_user.id)
     elif user_id:
-        query['user_id'] = user_id
+        query = query.eq('user_id', user_id)
     
     if status:
-        query['status'] = status.value
+        query = query.eq('status', status.value)
     
-    timesheets = await db.timesheets.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
-    
-    # Parse datetime strings
-    for ts in timesheets:
-        if ts.get('submitted_at') and isinstance(ts['submitted_at'], str):
-            ts['submitted_at'] = datetime.fromisoformat(ts['submitted_at'])
-        if ts.get('reviewed_at') and isinstance(ts['reviewed_at'], str):
-            ts['reviewed_at'] = datetime.fromisoformat(ts['reviewed_at'])
-        if isinstance(ts['created_at'], str):
-            ts['created_at'] = datetime.fromisoformat(ts['created_at'])
-    
-    return timesheets
+    result = query.order('created_at', desc=True).limit(1000).execute()
+    return result.data
 
 @api_router.put("/timesheets/{timesheet_id}/review")
 async def review_timesheet(
@@ -604,23 +519,24 @@ async def review_timesheet(
     review: TimesheetReview,
     admin_user: User = Depends(get_admin_user)
 ):
-    timesheet = await db.timesheets.find_one({"id": timesheet_id}, {"_id": 0})
-    if not timesheet:
+    result = supabase.table('timesheets').select('*').eq('id', timesheet_id).execute()
+    if not result.data:
         raise HTTPException(status_code=404, detail="Timesheet not found")
+    
+    timesheet = result.data[0]
     
     if review.status == TimesheetStatus.DENIED and not review.admin_comment:
         raise HTTPException(status_code=400, detail="Comment required when denying timesheet")
     
     now = datetime.now(timezone.utc)
-    await db.timesheets.update_one(
-        {"id": timesheet_id},
-        {"$set": {
-            "status": review.status.value,
-            "reviewed_at": now.isoformat(),
-            "reviewed_by": admin_user.id,
-            "admin_comment": review.admin_comment
-        }}
-    )
+    update_data = {
+        "status": review.status.value,
+        "reviewed_at": now.isoformat(),
+        "reviewed_by": admin_user.id,
+        "admin_comment": review.admin_comment
+    }
+    
+    supabase.table('timesheets').update(update_data).eq('id', timesheet_id).execute()
     
     # Create notification for the employee
     employee_id = timesheet['user_id']
@@ -648,36 +564,28 @@ async def review_timesheet(
 # Admin - Employee Management
 @api_router.get("/admin/employees", response_model=List[User])
 async def get_employees(admin_user: User = Depends(get_admin_user)):
-    users = await db.users.find({}, {"_id": 0, "password": 0}).sort("created_at", -1).to_list(1000)
-    
-    for user in users:
-        if isinstance(user['created_at'], str):
-            user['created_at'] = datetime.fromisoformat(user['created_at'])
-    
-    return users
+    result = supabase.table('users').select('id, email, name, role, status, default_project, default_task, created_at').order('created_at', desc=True).execute()
+    return result.data
 
 @api_router.post("/admin/employees", response_model=User)
 async def create_employee(employee: UserCreate, admin_user: User = Depends(get_admin_user)):
     # Check if email exists
-    existing = await db.users.find_one({"email": employee.email}, {"_id": 0})
-    if existing:
+    result = supabase.table('users').select('*').eq('email', employee.email).execute()
+    if result.data:
         raise HTTPException(status_code=400, detail="Email already registered")
     
-    user = User(
-        email=employee.email,
-        name=employee.name,
-        role=employee.role,
-        status=employee.status,
-        default_project=employee.default_project,
-        default_task=employee.default_task
-    )
+    user_data = {
+        "email": employee.email,
+        "name": employee.name,
+        "password": hash_password(employee.password),
+        "role": employee.role.value,
+        "status": employee.status.value,
+        "default_project": employee.default_project,
+        "default_task": employee.default_task
+    }
     
-    user_doc = user.model_dump()
-    user_doc['password'] = hash_password(employee.password)
-    user_doc['created_at'] = user_doc['created_at'].isoformat()
-    await db.users.insert_one(user_doc)
-    
-    return user
+    result = supabase.table('users').insert(user_data).execute()
+    return result.data[0] if result.data else None
 
 @api_router.put("/admin/employees/{user_id}", response_model=User)
 async def update_employee(
@@ -685,46 +593,34 @@ async def update_employee(
     update: UserUpdate,
     admin_user: User = Depends(get_admin_user)
 ):
-    user = await db.users.find_one({"id": user_id}, {"_id": 0})
-    if not user:
+    result = supabase.table('users').select('*').eq('id', user_id).execute()
+    if not result.data:
         raise HTTPException(status_code=404, detail="User not found")
     
     update_data = update.model_dump(exclude_unset=True)
     if 'password' in update_data:
         update_data['password'] = hash_password(update_data['password'])
     
-    await db.users.update_one({"id": user_id}, {"$set": update_data})
-    
-    updated_user = await db.users.find_one({"id": user_id}, {"_id": 0})
-    if isinstance(updated_user['created_at'], str):
-        updated_user['created_at'] = datetime.fromisoformat(updated_user['created_at'])
-    
-    return User(**updated_user)
+    result = supabase.table('users').update(update_data).eq('id', user_id).execute()
+    return result.data[0] if result.data else None
 
 # Projects Management
 @api_router.get("/projects", response_model=List[Project])
 async def get_projects(current_user: User = Depends(get_current_user)):
-    projects = await db.projects.find({}, {"_id": 0}).sort("created_at", -1).to_list(1000)
-    
-    for project in projects:
-        if isinstance(project['created_at'], str):
-            project['created_at'] = datetime.fromisoformat(project['created_at'])
-    
-    return projects
+    result = supabase.table('projects').select('*').order('created_at', desc=True).execute()
+    return result.data
 
 @api_router.post("/projects", response_model=Project)
 async def create_project(project: ProjectCreate, admin_user: User = Depends(get_admin_user)):
-    new_project = Project(
-        name=project.name,
-        description=project.description,
-        created_by=admin_user.id
-    )
+    project_data = {
+        "name": project.name,
+        "description": project.description,
+        "created_by": admin_user.id,
+        "status": "active"
+    }
     
-    project_doc = new_project.model_dump()
-    project_doc['created_at'] = project_doc['created_at'].isoformat()
-    await db.projects.insert_one(project_doc)
-    
-    return new_project
+    result = supabase.table('projects').insert(project_data).execute()
+    return result.data[0] if result.data else None
 
 @api_router.put("/projects/{project_id}", response_model=Project)
 async def update_project(
@@ -732,47 +628,35 @@ async def update_project(
     update: ProjectCreate,
     admin_user: User = Depends(get_admin_user)
 ):
-    project = await db.projects.find_one({"id": project_id}, {"_id": 0})
-    if not project:
+    result = supabase.table('projects').select('*').eq('id', project_id).execute()
+    if not result.data:
         raise HTTPException(status_code=404, detail="Project not found")
     
     update_data = update.model_dump(exclude_unset=True)
-    await db.projects.update_one({"id": project_id}, {"$set": update_data})
-    
-    updated = await db.projects.find_one({"id": project_id}, {"_id": 0})
-    if isinstance(updated['created_at'], str):
-        updated['created_at'] = datetime.fromisoformat(updated['created_at'])
-    
-    return Project(**updated)
+    result = supabase.table('projects').update(update_data).eq('id', project_id).execute()
+    return result.data[0] if result.data else None
 
 # Tasks Management
 @api_router.get("/tasks", response_model=List[Task])
 async def get_tasks(project_id: Optional[str] = None, current_user: User = Depends(get_current_user)):
-    query = {}
+    query = supabase.table('tasks').select('*')
     if project_id:
-        query['project_id'] = project_id
+        query = query.eq('project_id', project_id)
     
-    tasks = await db.tasks.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
-    
-    for task in tasks:
-        if isinstance(task['created_at'], str):
-            task['created_at'] = datetime.fromisoformat(task['created_at'])
-    
-    return tasks
+    result = query.order('created_at', desc=True).execute()
+    return result.data
 
 @api_router.post("/tasks", response_model=Task)
 async def create_task(task: TaskCreate, admin_user: User = Depends(get_admin_user)):
-    new_task = Task(
-        name=task.name,
-        description=task.description,
-        project_id=task.project_id
-    )
+    task_data = {
+        "name": task.name,
+        "description": task.description,
+        "project_id": task.project_id,
+        "status": "active"
+    }
     
-    task_doc = new_task.model_dump()
-    task_doc['created_at'] = task_doc['created_at'].isoformat()
-    await db.tasks.insert_one(task_doc)
-    
-    return new_task
+    result = supabase.table('tasks').insert(task_data).execute()
+    return result.data[0] if result.data else None
 
 @api_router.put("/tasks/{task_id}", response_model=Task)
 async def update_task(
@@ -780,18 +664,13 @@ async def update_task(
     update: TaskCreate,
     admin_user: User = Depends(get_admin_user)
 ):
-    task = await db.tasks.find_one({"id": task_id}, {"_id": 0})
-    if not task:
+    result = supabase.table('tasks').select('*').eq('id', task_id).execute()
+    if not result.data:
         raise HTTPException(status_code=404, detail="Task not found")
     
     update_data = update.model_dump(exclude_unset=True)
-    await db.tasks.update_one({"id": task_id}, {"$set": update_data})
-    
-    updated = await db.tasks.find_one({"id": task_id}, {"_id": 0})
-    if isinstance(updated['created_at'], str):
-        updated['created_at'] = datetime.fromisoformat(updated['created_at'])
-    
-    return Task(**updated)
+    result = supabase.table('tasks').update(update_data).eq('id', task_id).execute()
+    return result.data[0] if result.data else None
 
 # Reports
 @api_router.get("/reports/time")
@@ -804,25 +683,29 @@ async def get_time_report(
     current_user: User = Depends(get_current_user)
 ):
     # Build query
-    query = {
-        "date": {"$gte": start_date, "$lte": end_date}
-    }
+    query = supabase.table('time_entries').select('*').gte('date', start_date).lte('date', end_date)
     
     if current_user.role == UserRole.EMPLOYEE:
-        query['user_id'] = current_user.id
+        query = query.eq('user_id', current_user.id)
     elif user_id:
-        query['user_id'] = user_id
+        query = query.eq('user_id', user_id)
     
     if project_id:
-        query['project_id'] = project_id
+        query = query.eq('project_id', project_id)
     
     # Get entries
-    entries = await db.time_entries.find(query, {"_id": 0}).to_list(10000)
+    entries_result = query.execute()
+    entries = entries_result.data
     
     # Get related data
-    users = {u['id']: u for u in await db.users.find({}, {"_id": 0}).to_list(1000)}
-    projects = {p['id']: p for p in await db.projects.find({}, {"_id": 0}).to_list(1000)}
-    tasks = {t['id']: t for t in await db.tasks.find({}, {"_id": 0}).to_list(1000)}
+    users_result = supabase.table('users').select('*').execute()
+    users = {u['id']: u for u in users_result.data}
+    
+    projects_result = supabase.table('projects').select('*').execute()
+    projects = {p['id']: p for p in projects_result.data}
+    
+    tasks_result = supabase.table('tasks').select('*').execute()
+    tasks = {t['id']: t for t in tasks_result.data}
     
     # Group data
     grouped = {}
@@ -877,22 +760,26 @@ async def export_pdf(
     current_user: User = Depends(get_current_user)
 ):
     # Build query
-    query = {
-        "date": {"$gte": start_date, "$lte": end_date}
-    }
+    query = supabase.table('time_entries').select('*').gte('date', start_date).lte('date', end_date)
     
     if current_user.role == UserRole.EMPLOYEE:
-        query['user_id'] = current_user.id
+        query = query.eq('user_id', current_user.id)
     elif user_id:
-        query['user_id'] = user_id
+        query = query.eq('user_id', user_id)
     
     # Get entries
-    entries = await db.time_entries.find(query, {"_id": 0}).to_list(10000)
+    entries_result = query.execute()
+    entries = entries_result.data
     
     # Get related data
-    users = {u['id']: u for u in await db.users.find({}, {"_id": 0}).to_list(1000)}
-    projects = {p['id']: p for p in await db.projects.find({}, {"_id": 0}).to_list(1000)}
-    tasks = {t['id']: t for t in await db.tasks.find({}, {"_id": 0}).to_list(1000)}
+    users_result = supabase.table('users').select('*').execute()
+    users = {u['id']: u for u in users_result.data}
+    
+    projects_result = supabase.table('projects').select('*').execute()
+    projects = {p['id']: p for p in projects_result.data}
+    
+    tasks_result = supabase.table('tasks').select('*').execute()
+    tasks = {t['id']: t for t in tasks_result.data}
     
     # Create PDF
     buffer = io.BytesIO()
@@ -958,22 +845,26 @@ async def export_csv(
     current_user: User = Depends(get_current_user)
 ):
     # Build query
-    query = {
-        "date": {"$gte": start_date, "$lte": end_date}
-    }
+    query = supabase.table('time_entries').select('*').gte('date', start_date).lte('date', end_date)
     
     if current_user.role == UserRole.EMPLOYEE:
-        query['user_id'] = current_user.id
+        query = query.eq('user_id', current_user.id)
     elif user_id:
-        query['user_id'] = user_id
+        query = query.eq('user_id', user_id)
     
     # Get entries
-    entries = await db.time_entries.find(query, {"_id": 0}).to_list(10000)
+    entries_result = query.execute()
+    entries = entries_result.data
     
     # Get related data
-    users = {u['id']: u for u in await db.users.find({}, {"_id": 0}).to_list(1000)}
-    projects = {p['id']: p for p in await db.projects.find({}, {"_id": 0}).to_list(1000)}
-    tasks = {t['id']: t for t in await db.tasks.find({}, {"_id": 0}).to_list(1000)}
+    users_result = supabase.table('users').select('*').execute()
+    users = {u['id']: u for u in users_result.data}
+    
+    projects_result = supabase.table('projects').select('*').execute()
+    projects = {p['id']: p for p in projects_result.data}
+    
+    tasks_result = supabase.table('tasks').select('*').execute()
+    tasks = {t['id']: t for t in tasks_result.data}
     
     # Build CSV
     csv_data = "Date,Employee,Project,Task,Duration (hours)\n"
@@ -997,13 +888,21 @@ async def export_csv(
 async def get_dashboard_stats(current_user: User = Depends(get_current_user)):
     if current_user.role == UserRole.ADMIN:
         # Admin stats
-        total_employees = await db.users.count_documents({"role": UserRole.EMPLOYEE.value})
-        active_employees = await db.users.count_documents({"role": UserRole.EMPLOYEE.value, "status": UserStatus.ACTIVE.value})
-        pending_timesheets = await db.timesheets.count_documents({"status": TimesheetStatus.SUBMITTED.value})
-        total_projects = await db.projects.count_documents({})
+        total_employees_result = supabase.table('users').select('id', count='exact').eq('role', UserRole.EMPLOYEE.value).execute()
+        total_employees = total_employees_result.count or 0
+        
+        active_employees_result = supabase.table('users').select('id', count='exact').eq('role', UserRole.EMPLOYEE.value).eq('status', UserStatus.ACTIVE.value).execute()
+        active_employees = active_employees_result.count or 0
+        
+        pending_timesheets_result = supabase.table('timesheets').select('id', count='exact').eq('status', TimesheetStatus.SUBMITTED.value).execute()
+        pending_timesheets = pending_timesheets_result.count or 0
+        
+        total_projects_result = supabase.table('projects').select('id', count='exact').execute()
+        total_projects = total_projects_result.count or 0
         
         # Active timers
-        active_timers = await db.timer_sessions.count_documents({"is_active": True})
+        active_timers_result = supabase.table('timer_sessions').select('id', count='exact').eq('is_active', True).execute()
+        active_timers = active_timers_result.count or 0
         
         return {
             "total_employees": total_employees,
@@ -1017,19 +916,16 @@ async def get_dashboard_stats(current_user: User = Depends(get_current_user)):
         today = datetime.now(timezone.utc).date().isoformat()
         week_start = (datetime.now(timezone.utc).date() - timedelta(days=datetime.now(timezone.utc).weekday())).isoformat()
         
-        today_entries = await db.time_entries.find({"user_id": current_user.id, "date": today}, {"_id": 0}).to_list(1000)
-        today_seconds = sum(e.get('duration', 0) for e in today_entries)
+        today_entries_result = supabase.table('time_entries').select('duration').eq('user_id', current_user.id).eq('date', today).execute()
+        today_seconds = sum(e.get('duration', 0) for e in today_entries_result.data)
         
-        week_entries = await db.time_entries.find({
-            "user_id": current_user.id,
-            "date": {"$gte": week_start}
-        }, {"_id": 0}).to_list(1000)
-        week_seconds = sum(e.get('duration', 0) for e in week_entries)
+        week_entries_result = supabase.table('time_entries').select('duration').eq('user_id', current_user.id).gte('date', week_start).execute()
+        week_seconds = sum(e.get('duration', 0) for e in week_entries_result.data)
         
         return {
             "today_hours": round(today_seconds / 3600, 2),
             "week_hours": round(week_seconds / 3600, 2),
-            "total_entries": len(week_entries)
+            "total_entries": len(week_entries_result.data)
         }
 
 
@@ -1040,26 +936,14 @@ async def get_notifications(
     current_user: User = Depends(get_current_user)
 ):
     """Get user's notifications"""
-    notifications = await db.notifications.find(
-        {"user_id": current_user.id},
-        {"_id": 0}
-    ).sort("created_at", -1).limit(limit).to_list(limit)
-    
-    # Parse datetime strings
-    for notif in notifications:
-        if isinstance(notif['created_at'], str):
-            notif['created_at'] = datetime.fromisoformat(notif['created_at'])
-    
-    return notifications
+    result = supabase.table('notifications').select('*').eq('user_id', current_user.id).order('created_at', desc=True).limit(limit).execute()
+    return result.data
 
 @api_router.get("/notifications/unread-count")
 async def get_unread_count(current_user: User = Depends(get_current_user)):
     """Get count of unread notifications"""
-    count = await db.notifications.count_documents({
-        "user_id": current_user.id,
-        "read": False
-    })
-    return {"count": count}
+    result = supabase.table('notifications').select('id', count='exact').eq('user_id', current_user.id).eq('read', False).execute()
+    return {"count": result.count or 0}
 
 @api_router.put("/notifications/{notification_id}/read")
 async def mark_notification_read(
@@ -1067,28 +951,19 @@ async def mark_notification_read(
     current_user: User = Depends(get_current_user)
 ):
     """Mark a notification as read"""
-    notification = await db.notifications.find_one({
-        "id": notification_id,
-        "user_id": current_user.id
-    }, {"_id": 0})
+    result = supabase.table('notifications').select('*').eq('id', notification_id).eq('user_id', current_user.id).execute()
     
-    if not notification:
+    if not result.data:
         raise HTTPException(status_code=404, detail="Notification not found")
     
-    await db.notifications.update_one(
-        {"id": notification_id},
-        {"$set": {"read": True}}
-    )
+    supabase.table('notifications').update({"read": True}).eq('id', notification_id).execute()
     
     return {"success": True}
 
 @api_router.put("/notifications/mark-all-read")
 async def mark_all_notifications_read(current_user: User = Depends(get_current_user)):
     """Mark all user's notifications as read"""
-    await db.notifications.update_many(
-        {"user_id": current_user.id, "read": False},
-        {"$set": {"read": True}}
-    )
+    supabase.table('notifications').update({"read": True}).eq('user_id', current_user.id).eq('read', False).execute()
     
     return {"success": True}
 
@@ -1114,9 +989,8 @@ logger = logging.getLogger(__name__)
 
 @app.on_event("startup")
 async def startup_event():
-    await init_default_admin()
-    logger.info("Omni Gratum Time Tracking System started")
+    logger.info("Omni Gratum Time Tracking System started with Supabase")
 
 @app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
+async def shutdown_event():
+    logger.info("Shutting down Omni Gratum Time Tracking System")
